@@ -114,7 +114,12 @@ private
       QOI_HEADER_SIZE + QOI_PADDING'Length
       <= Storage_Count'Last - (Desc.Width * Desc.Height * (Desc.Channels + 1)));
 
-   -- Representations of QOI tags --
+   --  Representations of QOI tags.  A tag byte is made of a 2-bit operation
+   --  in the two most significant bits and a 6-bit payload.  The record
+   --  representation clauses below describe that layout and are used as the
+   --  source and target of Ada.Unchecked_Conversion instances in the body.
+   --  Such instances are supported in SPARK: GNATprove checks their size,
+   --  alignment and data validity at each instantiation.
 
    type Tag_Op is mod 2 ** 2 with Size => 2;
 

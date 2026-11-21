@@ -7,8 +7,6 @@ is
    pragma Compile_Time_Error
      (Storage_Element'Size /= 8, "Invalid element size");
 
-   pragma Warnings (Off, "lower bound test optimized away");
-
    subtype SE is Storage_Element;
 
    function As_Index  is new Ada.Unchecked_Conversion (SE, Index_Tag);

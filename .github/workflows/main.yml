@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           status=0
-          gnatprove -Pqoi.gpr -j6 --level=4 --prover=z3,cvc5 --timeout=10 --checks-as-errors=on --warnings=error --report=all -cargs -gnatef > output.txt 2>&1 || status=$?
+          gnatprove -Pqoi.gpr -j6 --level=4 --prover=z3,cvc5 --timeout=10 --checks-as-errors=on --warnings=error --report=all -W=imprecise-unchecked-conversion -cargs -gnatef > output.txt 2>&1 || status=$?
           cat output.txt
           cat output.txt | reviewdog -efm="%f:%l:%c: %m" -diff="git diff master" --reporter=github-pr-review
           # Check for errors

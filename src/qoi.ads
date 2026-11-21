@@ -45,6 +45,8 @@ is
          and then Pix'First >= 1
          and then Pix'Length = (Desc.Width * Desc.Height * Desc.Channels),
      Post =>
+       Output_Size <= Encode_Worst_Case (Desc)
+         and then
        Output (Output'First .. Output'First - 1 + Output_Size)'Initialized;
    --  Encode an RGB or RGBA image to QOI.
    --

@@ -24,7 +24,9 @@ is
    type Index_Range is range 0 .. 63;
    subtype Run_Range is Unsigned_32 range 0 .. 62;
 
-   function Hash (C : Color) return SE;
+   function Hash (C : Color) return SE
+   with
+     Post => Hash'Result = C.R * 3 + C.G * 5 + C.B * 7 + C.A * 11;
 
    ----------
    -- Hash --
@@ -112,7 +114,20 @@ is
 
       subtype Pixel_Index is Storage_Count range 0 .. Number_Of_Pixels - 1;
 
-      function Read (Index : Pixel_Index) return Color;
+      function Read (Index : Pixel_Index) return Color
+      with
+        Pre  =>
+          Valid_Size (Desc)
+            and then Pix'First >= 1
+            and then Pix'Length = Desc.Width * Desc.Height * Desc.Channels,
+        Post =>
+          Read'Result.R = Pix (Pix'First + Index * Desc.Channels)
+            and then Read'Result.G = Pix (Pix'First + Index * Desc.Channels + 1)
+            and then Read'Result.B = Pix (Pix'First + Index * Desc.Channels + 2)
+            and then Read'Result.A =
+              (if Desc.Channels = 4
+               then Pix (Pix'First + Index * Desc.Channels + 3)
+               else 255);
 
       ----------
       -- Read --
@@ -165,6 +180,15 @@ is
               QOI_HEADER_SIZE
             + (Desc.Channels + 1) *
             (Storage_Count (Px_Index) - Storage_Count (Run)));
+         --  Keep an explicit bound on the remaining output capacity.  This
+         --  makes the slice range checks below immediate for the provers
+         --  instead of requiring them to rediscover the worst-case bound.
+         pragma Loop_Invariant
+           (P - Output'First + QOI_PADDING'Length <=
+              Encode_Worst_Case (Desc));
+         pragma Loop_Invariant
+           (P - Output'First <=
+              QOI_HEADER_SIZE + (Desc.Channels + 1) * Number_Of_Pixels);
          pragma Loop_Invariant (Output (Output'First .. P - 1)'Initialized);
          pragma Loop_Invariant (if Desc.Channels /= 4 then Px_Prev.A = 255);
 
@@ -254,8 +278,9 @@ is
       end loop;
 
       pragma Assert (Output (Output'First .. P - 1)'Initialized);
-      pragma Assert (P - Output'First in
-        0 .. QOI_HEADER_SIZE + (Desc.Channels + 1) * Number_Of_Pixels);
+      pragma Assert (P - Output'First <=
+                       QOI_HEADER_SIZE + (Desc.Channels + 1) *
+                       Number_Of_Pixels);
 
       for Index in QOI_PADDING'Range loop
          pragma Loop_Invariant
@@ -278,8 +303,25 @@ is
    is
       P : Storage_Count := Data'First;
 
-      procedure Pop8  (Result : out SE);
-      procedure Pop32 (Result : out Unsigned_32);
+      procedure Pop8 (Result : out SE)
+      with
+        Pre  => P in Data'Range and then Data'Last < Storage_Count'Last,
+        Post => P = P'Old + 1 and then Result = Data (P'Old);
+
+      procedure Pop32 (Result : out Unsigned_32)
+      with
+        Pre  =>
+          P >= Data'First
+            and then P <= Storage_Count'Last - 3
+            and then P + 3 <= Data'Last
+            and then Data'Last < Storage_Count'Last,
+        Post =>
+          P = P'Old + 4
+            and then Result =
+              (Shift_Left (Unsigned_32 (Data (P'Old)), 24)
+               or Shift_Left (Unsigned_32 (Data (P'Old + 1)), 16)
+               or Shift_Left (Unsigned_32 (Data (P'Old + 2)), 8)
+               or Unsigned_32 (Data (P'Old + 3)));
 
       procedure Pop8 (Result : out SE) is
       begin

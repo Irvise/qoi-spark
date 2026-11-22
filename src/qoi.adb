@@ -1,5 +1,3 @@
-with Ada.Unchecked_Conversion;
-
 package body QOI
 with SPARK_Mode
 is
@@ -9,11 +7,16 @@ is
 
    subtype SE is Storage_Element;
 
-   function As_Index  is new Ada.Unchecked_Conversion (SE, Index_Tag);
-   function As_Diff   is new Ada.Unchecked_Conversion (SE, Diff_Tag);
-   function As_LUMA_A is new Ada.Unchecked_Conversion (SE, LUMA_Tag_A);
-   function As_LUMA_B is new Ada.Unchecked_Conversion (SE, LUMA_Tag_B);
-   function As_Run    is new Ada.Unchecked_Conversion (SE, Run_Tag);
+   --  A tag byte is made of a 2-bit opcode in the two most significant bits
+   --  and a 6-bit payload.  Building and decoding it with modular arithmetic
+   --  keeps every subprogram of this unit inside SPARK.
+
+   function Tag_Byte (Op : Tag_Op; Payload : Unsigned_32) return SE
+   is (SE (Shift_Left (Unsigned_32 (Op), 6) or Payload))
+   with Pre => Payload <= 16#3F#;
+
+   function Op_Of (B : SE) return Tag_Op
+   is (Tag_Op (Shift_Right (Unsigned_32 (B), 6) and 16#3#));
 
    type Color is record
       R, G, B, A : SE;
@@ -63,13 +66,10 @@ is
         Post =>
           P = P'Old + 4 and then Output (Output'First .. P - 1)'Initialized;
 
-      generic
-         type T is private;
-      procedure Gen_Push_8 (D : T)
+      procedure Push_Byte (D : SE)
       with
         Pre  =>
             Valid_Parameters
-            and then T'Size = 8
             and then P in Output'Range
             and then Output (Output'First .. P - 1)'Initialized,
         Post =>
@@ -90,25 +90,20 @@ is
       end Push;
 
       ----------------
-      -- Gen_Push_8 --
+      -- Push_Byte --
       ----------------
 
-      procedure Gen_Push_8  (D : T) is
-         function To_Byte is new Ada.Unchecked_Conversion (T, SE);
+      procedure Push_Byte (D : SE) is
       begin
-         Output (P) := To_Byte (D);
+         Output (P) := D;
 
          P := P + 1;
-      end Gen_Push_8;
-
-      procedure Push        is new Gen_Push_8 (SE);
-      procedure Push_Run    is new Gen_Push_8 (Run_Tag);
-      procedure Push_Index  is new Gen_Push_8 (Index_Tag);
-      procedure Push_Diff   is new Gen_Push_8 (Diff_Tag);
-      procedure Push_Luma_A is new Gen_Push_8 (LUMA_Tag_A);
-      procedure Push_Luma_B is new Gen_Push_8 (LUMA_Tag_B);
+      end Push_Byte;
 
       Number_Of_Pixels : constant Storage_Count := Desc.Width * Desc.Height;
+
+      Max_Bytes : constant Storage_Count :=
+        QOI_HEADER_SIZE + (Desc.Channels + 1) * Number_Of_Pixels;
 
       subtype Pixel_Index is Storage_Count range 0 .. Number_Of_Pixels - 1;
 
@@ -161,8 +156,8 @@ is
       Push (QOI_MAGIC);
       Push (Unsigned_32 (Desc.Width));
       Push (Unsigned_32 (Desc.Height));
-      Push (SE (Desc.Channels));
-      Push (SE (Desc.Colorspace'Enum_Rep));
+      Push_Byte (SE (Desc.Channels));
+      Push_Byte (SE (Desc.Colorspace'Enum_Rep));
 
       pragma Assert (P = Output'First + QOI_HEADER_SIZE);
       pragma Assert (Run = 0);
@@ -182,11 +177,8 @@ is
          --  makes the slice range checks below immediate for the provers
          --  instead of requiring them to rediscover the worst-case bound.
          pragma Loop_Invariant
-           (P - Output'First + QOI_PADDING'Length <=
-              Encode_Worst_Case (Desc));
-         pragma Loop_Invariant
            (P - Output'First <=
-              QOI_HEADER_SIZE + (Desc.Channels + 1) * Number_Of_Pixels);
+              Encode_Worst_Case (Desc) - QOI_PADDING'Length);
          pragma Loop_Invariant (Output (Output'First .. P - 1)'Initialized);
          pragma Loop_Invariant (if Desc.Channels /= 4 then Px_Prev.A = 255);
 
@@ -197,14 +189,14 @@ is
 
             if Run = Run_Range'Last or else Px_Index = Pixel_Index'Last
             then
-               Push_Run ((Op => QOI_OP_RUN, Run => Uint6 (Run - 1)));
+               Push_Byte (Tag_Byte (QOI_OP_RUN, Run - 1));
                Run := 0;
             end if;
 
          else
 
             if Run > 0 then
-               Push_Run ((Op => QOI_OP_RUN, Run => Uint6 (Run - 1)));
+               Push_Byte (Tag_Byte (QOI_OP_RUN, Run - 1));
                Run := 0;
             end if;
 
@@ -218,8 +210,8 @@ is
                  Index_Range (Hash (Px) mod Index'Length);
             begin
                if Index (Index_Pos) = Px then
-                  Push_Index ((Op    => QOI_OP_INDEX,
-                               Index => Uint6 (Index_Pos)));
+                  Push_Byte
+                    (Tag_Byte (QOI_OP_INDEX, Unsigned_32 (Index_Pos)));
                else
                   Index (Index_Pos) := Px;
 
@@ -239,33 +231,36 @@ is
                           and then VG in -2 .. 1
                           and then VB in -2 .. 1
                         then
-                           Push_Diff ((Op  => QOI_OP_DIFF,
-                                       DR  => Uint2 (VR + 2),
-                                       DG  => Uint2 (VG + 2),
-                                       DB  => Uint2 (VB + 2)));
+                           Push_Byte
+                             (Tag_Byte
+                                (QOI_OP_DIFF,
+                                 Unsigned_32 (VB + 2)
+                                   or Shift_Left (Unsigned_32 (VG + 2), 2)
+                                   or Shift_Left (Unsigned_32 (VR + 2), 4)));
 
                         elsif      VG_R in -8 .. 7
                           and then VG   in -32 .. 31
                           and then VG_B in -8 .. 7
                         then
-                           Push_Luma_A ((Op  => QOI_OP_LUMA,
-                                         DG  => Uint6 (VG + 32)));
-                           Push_Luma_B ((DG_R => Uint4 (VG_R + 8),
-                                         DG_B => Uint4 (VG_B + 8)));
+                           Push_Byte
+                             (Tag_Byte (QOI_OP_LUMA, Unsigned_32 (VG + 32)));
+                           Push_Byte
+                             (SE (Unsigned_32 (VG_B + 8)
+                                  or Shift_Left (Unsigned_32 (VG_R + 8), 4)));
 
                         else
-                           Push (QOI_OP_RGB);
-                           Push (Px.R);
-                           Push (Px.G);
-                           Push (Px.B);
+                           Push_Byte (QOI_OP_RGB);
+                           Push_Byte (Px.R);
+                           Push_Byte (Px.G);
+                           Push_Byte (Px.B);
                         end if;
                      end;
                   else
-                     Push (QOI_OP_RGBA);
-                     Push (Px.R);
-                     Push (Px.G);
-                     Push (Px.B);
-                     Push (Px.A);
+                     Push_Byte (QOI_OP_RGBA);
+                     Push_Byte (Px.R);
+                     Push_Byte (Px.G);
+                     Push_Byte (Px.B);
+                     Push_Byte (Px.A);
                   end if;
                end if;
             end;
@@ -276,16 +271,15 @@ is
       end loop;
 
       pragma Assert (Output (Output'First .. P - 1)'Initialized);
-      pragma Assert (P - Output'First <=
-                       QOI_HEADER_SIZE + (Desc.Channels + 1) *
-                       Number_Of_Pixels);
+      pragma Assert (Run = 0);
+      pragma Assert (P - Output'First <= Max_Bytes);
 
       for Index in QOI_PADDING'Range loop
          pragma Loop_Invariant
            (P - Output'First in
               0 .. Encode_Worst_Case (Desc) - QOI_PADDING'Length + Index - 1);
          pragma Loop_Invariant (Output (Output'First .. P - 1)'Initialized);
-         Push (QOI_PADDING (Index));
+         Push_Byte (QOI_PADDING (Index));
       end loop;
 
       pragma Assert (Output (Output'First .. P - 1)'Initialized);
@@ -473,26 +467,29 @@ is
                   Pop (Px.A);
 
                else
-                  case As_Run (B1).Op is
+                  case Op_Of (B1) is
 
                   when QOI_OP_INDEX =>
-                     Px := Index (Index_Range (As_Index (B1).Index));
+                     Px := Index (Index_Range (Unsigned_32 (B1) and 16#3F#));
 
                   when QOI_OP_DIFF =>
-                     Px.R := Px.R + SE (As_Diff (B1).DR) - 2;
-                     Px.G := Px.G + SE (As_Diff (B1).DG) - 2;
-                     Px.B := Px.B + SE (As_Diff (B1).DB) - 2;
+                     Px.R := Px.R
+                       + SE (Shift_Right (Unsigned_32 (B1), 4) and 16#3#) - 2;
+                     Px.G := Px.G
+                       + SE (Shift_Right (Unsigned_32 (B1), 2) and 16#3#) - 2;
+                     Px.B := Px.B + SE (Unsigned_32 (B1) and 16#3#) - 2;
 
                   when QOI_OP_LUMA =>
                      Pop (B2);
-                     VG := SE (As_LUMA_A (B1).DG) - 32;
+                     VG := SE (Unsigned_32 (B1) and 16#3F#) - 32;
 
-                     Px.R := Px.R + VG + SE (As_LUMA_B (B2).DG_R) - 8;
+                     Px.R := Px.R + VG
+                       + SE (Shift_Right (Unsigned_32 (B2), 4)) - 8;
                      Px.G := Px.G + VG;
-                     Px.B := Px.B + VG + SE (As_LUMA_B (B2).DG_B) - 8;
+                     Px.B := Px.B + VG + SE (Unsigned_32 (B2) and 16#0F#) - 8;
 
                   when QOI_OP_RUN =>
-                     Run := Run_Range (As_Run (B1).Run mod 63);
+                     Run := Run_Range ((Unsigned_32 (B1) and 16#3F#) mod 63);
 
                   end case;
                end if;
